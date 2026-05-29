@@ -66,3 +66,172 @@ cs := make(chan *os.File, 100)  // buffered channel of pointers to Files
 Note: 
 A semaphore is a counter in memory that limits how many workers can run a section of code at once.A semaphore is a counter in memory that limits how many workers can run a section of code at once. Workers grab a slot before entering, release it after. If all slots are taken, others wait
 
+
+
+# Go: Structs, Methods, and Interfaces
+
+A minimal reference. Go has no classes and no inheritance. These three pieces replace them.
+
+---
+
+## 1. Struct = data
+
+A struct holds fields. It is just grouped data.
+
+```go
+type Dog struct {
+    name string
+    age  int
+}
+```
+
+---
+
+## 2. Methods = behavior attached to a struct
+
+A method is a function with a **receiver** — the `(d *Dog)` part. The receiver attaches the function to a type and acts as Go's explicit `this`.
+
+```go
+func (d *Dog) Bark() {
+    d.name = "Rex"   // d refers to the specific Dog this was called on
+}
+```
+
+Reading `func (d *Dog) Bark()`:
+- `Dog` — the type this method belongs to.
+- `d` — the name used inside the method to refer to the instance (your `this`). Pick any name; convention is a short one, reused on every method of that type.
+- `*` — **pointer receiver**: the method can modify the struct and changes persist. Without `*` (value receiver), the method gets a *copy* and changes vanish on return.
+
+Rule of thumb: use pointer receivers (`*`) when the method mutates state. If your updates mysteriously don't stick, a missing `*` is the cause.
+
+**Call methods on instances, never on the type:**
+
+```go
+d := Dog{name: "Rex", age: 3}
+d.Bark()      // correct — d is an instance
+Dog.Bark()    // wrong — Dog is the type (the blueprint)
+```
+
+**Capitalization = access control** (no `public`/`private` keyword):
+- Capital first letter → exported (public): `Bark`, `Make`
+- lowercase first letter → unexported (private to the package): `name`, `age`
+
+---
+
+## 3. Interface = a checklist of methods
+
+An interface lists method signatures. It is a requirement *for types*, used *by* functions.
+
+```go
+type Speaker interface {
+    Speak() string
+    Volume() int
+}
+```
+
+This says: "to be a `Speaker`, a type must have both a `Speak() string` method and a `Volume() int` method."
+
+### The key rule: satisfaction is implicit
+
+A type satisfies an interface **automatically** by having the required methods. There is **no `implements` keyword**, and **nothing is written inside the struct**.
+
+```go
+type Dog struct {
+    name string
+}
+
+func (d Dog) Speak() string { return "Woof" }
+func (d Dog) Volume() int   { return 10 }
+
+// Dog now satisfies Speaker — purely because it has both methods.
+// The Dog struct never mentions Speaker.
+```
+
+Contrast with C++ (`class Dog : public Speaker`): C++ makes you *declare* the relationship. Go just looks at the methods and concludes it. This is the one feature that feels backwards coming from C++.
+
+All-or-nothing: miss even one required method and the type does **not** satisfy the interface.
+
+```go
+var s Speaker = Dog{}   // compiles only if Dog has BOTH Speak() and Volume()
+```
+
+### How an interface is used
+
+A function asks for the interface; you pass any type that satisfies it.
+
+```go
+func makeItSpeak(s Speaker) {
+    fmt.Println(s.Speak())
+}
+
+makeItSpeak(Dog{})   // works if Dog satisfies Speaker
+makeItSpeak(Cat{})   // works if Cat satisfies Speaker
+```
+
+The function says "I accept anything that can do these things" without naming specific types. That is Go's polymorphism — through capabilities, not a base class.
+
+### Interfaces hold only methods, never fields
+
+Everything inside an interface must have `()` — it is all methods. A bare field is illegal.
+
+```go
+type Speaker interface {
+    Speak() string
+    Age()   int     // OK — a method returning int
+    age     int     // ILLEGAL — a field
+}
+```
+
+If you want an int as **data**, it goes in the struct. If you want the interface to require "this type can give me an int," make it a **method** that returns int (`Age() int`). The interface never stores the int — it only demands a method that produces one.
+
+### The empty interface: `interface{}` / `any`
+
+An interface with zero methods. Since nothing is required, **every type satisfies it** — so it holds *any* value. It is Go's `void*` / `Object`.
+
+```go
+var x interface{}
+x = 42        // fine
+x = "hello"   // fine
+x = Dog{}     // fine
+```
+
+`any` is the modern alias — identical to `interface{}`, just cleaner spelling.
+
+```go
+func Start(command any) (int, int, bool) { ... }
+```
+
+Here `command` is a parameter of type `any`, so `Start` accepts a command of any type. (This is exactly Raft's `Start` — the log stores arbitrary commands, so the type is "anything.")
+
+---
+
+## Syntax notes
+
+**Return-value parentheses are optional for a single return, required for multiple:**
+
+```go
+Speak() string             // normal
+Speak() (string)           // same thing — parens do nothing here
+Speak() (string, error)    // parens REQUIRED — two return values
+```
+
+---
+
+## One-line summary
+
+| Concept   | Is...                            | Holds / Lists      |
+|-----------|----------------------------------|--------------------|
+| Struct    | data (a noun)                    | fields             |
+| Method    | behavior attached via a receiver | logic              |
+| Interface | a capability (a checklist)       | method signatures  |
+
+- No classes — struct + methods is your class.
+- No inheritance — embedding (struct-inside-struct) is the closest substitute.
+- Interface satisfaction is implicit — having the methods is enough; nothing goes in the struct.
+- `*` receiver to mutate; capital letter to export; `()` means it's a method.
+
+
+
+Make notes no these later 
+- Going through in search of learning consensus algorithm Section 5.2 (they decided on ranking candidates, but had lots of edge cases, so fell back to random timeout option as it was obvious and understandable.)
+- 
