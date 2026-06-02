@@ -235,3 +235,27 @@ Speak() (string, error)    // parens REQUIRED — two return values
 Make notes no these later 
 - Going through in search of learning consensus algorithm Section 5.2 (they decided on ranking candidates, but had lots of edge cases, so fell back to random timeout option as it was obvious and understandable.)
 - 
+
+
+// to run tests for lab, raft1
+// to test everything in raft_test.go make raft1
+
+# Run a single test
+  cd /Users/abhineshdahal/Documents/Raft\ Consensus/6.5840/src/raft1
+  go test -run TestInitialElection3A -v
+
+  # Run all 3A tests
+  go test -run 3A -v
+
+  # Run all 3B tests
+  go test -run 3B -v
+
+  # Run everything
+  go test -v
+
+
+-- 
+
+  ## Raft_tests.go : 
+
+  TestInitialElection3A 
