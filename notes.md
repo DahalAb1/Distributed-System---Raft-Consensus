@@ -259,3 +259,23 @@ Make notes no these later
   ## Raft_tests.go : 
 
   TestInitialElection3A 
+
+
+---
+
+## June 4, 2026 — Raft 3A Debugging Session
+
+**Goal:** Get `TestInitialElection3A` to pass.
+
+**Left off:** About to implement `AppendEntries` handler — it needs to update `rf.lastHeard` when a heartbeat arrives so the follower doesn't trigger a spurious election.
+
+**Bugs found (none fixed yet):**
+1. `RequestVote` line 177 — condition inverted. Rejects vote when candidate has higher term, should grant it.
+2. `AppendEntries` handler line 164 — empty, never updates `rf.lastHeard`.
+3. `ticker()` line 313 — counts any successful RPC as a vote, should check `res.VoteGranted == true`.
+4. `ticker()` — no locks. Reads/writes `rf.role`, `rf.currentTerm`, `rf.votedFor`, `rf.lastHeard` without holding `rf.mu`. Race detector catches this.
+5. Election timeout line 285 — 5 seconds is too long, needs to be 150-300ms.
+
+**Key insight:** Follower logic does NOT go in `ticker()`. It goes in the RPC handlers (`AppendEntries`, `RequestVote`). The RPC framework calls those automatically when a remote peer invokes them via `Call()`.
+
+**Why errors change between runs without code changes:** Tests use randomness and goroutines — multiple bugs exist at the same time and which one surfaces first is non-deterministic.
