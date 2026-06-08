@@ -279,3 +279,81 @@ Make notes no these later
 **Key insight:** Follower logic does NOT go in `ticker()`. It goes in the RPC handlers (`AppendEntries`, `RequestVote`). The RPC framework calls those automatically when a remote peer invokes them via `Call()`.
 
 **Why errors change between runs without code changes:** Tests use randomness and goroutines — multiple bugs exist at the same time and which one surfaces first is non-deterministic.
+
+Problem I saw past, AppendRPC is sent to all the servers, but I did not think of updating the server's term, this had started multiple elections even though everything was working, so just updating the value 
+rf.lastHeard = time.Now(), fixed the problem, so the follower updates it's current time, that means it heard from the Leader, and does not start election. 
+
+**June 8, 2026 — Insight: goroutine reply isolation**
+
+**What I got wrong / was confused about:**
+I thought passing `res RequestVoteReply` by value to the goroutine was a problem — "the response won't be updated if it's a copy." I wanted to pass a pointer (`*resRPC`) so the RPC could write back into it.
+
+That instinct was backwards. Passing a pointer to the *shared outer variable* is exactly the bug — all goroutines would write their replies into the same memory at the same time → data race.
+
+**Why value copy is correct:**
+
+```go
+go func(i int, req RequestVoteArgs, res RequestVoteReply) {
+    rf.sendRequestVote(i, &req, &res)  // RPC writes into this goroutine's own res
+    if res.VoteGranted { ... }         // safe — nobody else touches this res
+}(i, reqRPC, resRPC)
+```
+
+- Each goroutine gets its own `res` copy on its stack. Totally isolated.
+- `&res` gives the RPC a pointer to *that goroutine's private copy* — so the reply does land correctly.
+- The old bug was `resRPC.VoteGranted` (outer shared var) — all goroutines were reading the same stale value, not their own reply.
+
+**Rule:** when N goroutines each need their own reply buffer, pass by value so each gets a private copy. Only share state under a lock.
+
+---
+
+**June 8, 2026 — Insight: don't forget to count your own vote**
+
+**What I got wrong:**
+I initialized `majorityServers := 0` and used `numPeers - 1` to adjust the threshold. The math looked right on the surface but was off — for 3 peers it required both other peers to vote yes, which is too strict.
+
+**Why it's wrong:**
+The paper says a candidate votes for itself first, then sends RequestVote to others. The self-vote is real — it counts toward majority. `majorityServers` only collects replies from other peers via RPC, so it starts one vote short unless you pre-count yourself.
+
+**Fix:**
+```go
+majorityServers := 1          // self-vote already cast (rf.votedFor = rf.me)
+numPeers := len(rf.peers)     // includes self, e.g. 3
+
+// after collecting peer replies:
+if majorityServers > numPeers/2 {  // 3 peers: need >1 → 2 total votes
+    rf.role = Leader
+}
+```
+
+For 3 peers: start at 1, get 1 peer vote → total 2 → `2 > 1` → win. Correct.
+
+**Rule:** initialize vote counter to 1 (self), not 0. The loop only collects peer responses — your own vote is already in.
+
+---
+
+**June 8, 2026 — Insight: WaitGroup Add/Done must always pair — skip before Add, not after**
+
+**What I was confused about:**
+I wanted to skip `i == rf.me` inside the goroutine body using `continue`. Thought it would just skip that iteration.
+
+**Why that's wrong:**
+`continue` inside the goroutine body doesn't skip the loop — it's already inside the goroutine. And even if it did skip, `wg.Add(1)` already ran. The counter is incremented but `wg.Done()` never fires → `wg.Wait()` blocks forever → deadlock.
+
+Note: `defer wg.Done()` *would* still fire on goroutine exit (defers always run). But the issue is calling `continue` *in the for loop body after `wg.Add(1)`* — goroutine is spawned but immediately returns without doing work, while the Add already happened.
+
+**Fix — skip before Add:**
+```go
+for i := range rf.peers {
+    if i == rf.me {
+        continue        // skip BEFORE wg.Add — no Add, no goroutine, no imbalance
+    }
+    wg.Add(1)
+    go func(i int, ...) {
+        defer wg.Done()
+        ...
+    }(i, ...)
+}
+```
+
+**Rule:** `wg.Add(1)` and `wg.Done()` must always pair 1:1. If you want to skip an iteration, do it *before* `wg.Add` so the counter is never incremented for that case.
