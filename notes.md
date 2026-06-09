@@ -357,3 +357,7 @@ for i := range rf.peers {
 ```
 
 **Rule:** `wg.Add(1)` and `wg.Done()` must always pair 1:1. If you want to skip an iteration, do it *before* `wg.Add` so the counter is never incremented for that case.
+
+
+
+Another learning: Whenever you are writing, or changing a state which 
