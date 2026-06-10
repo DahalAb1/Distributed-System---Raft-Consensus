@@ -368,3 +368,65 @@ June 9
 I've found a bug in code's current state. I was using wait groups to wait for all the RequestVoteRPC's go routines to return their response. And then I used this response to change our Candidate to the Leader. This idea is wrong because Raft does not wait for all the responses from it's peers. A Candidate is only concerned with 50% of vote from  it's peers. Therefore, The bug I was having with multiple election is found. In the next session I'll simply implement the check fo majority servers using go channels and convert my Candidate when I have recieved majority vote from our Peers. 
 
 I believe there's a fatal error in the implementation of this Lab. The rf.Peer holds all the servers, when we break the connection for more than 50% of servers including the leader, we would never be able to reach majority vote. Therefore, this will make our follower stay as followers forever, which is wrong. 
+
+
+June 10
+
+1. I implemented yesterday's concern. Which was about my old code handling election with deadlock and a single variable, I've utilized channels and the multi election problem was solved. Today, I also implemented leader droppping to follower when the leader sees append RPC from a leader with higher index, and reading online post about other people building raft got me aware of AppendRPC that we could encounter when the server's sleeping. 
+
+Lab1 Done!! Now time for Lab 2, leader election. This was a really long journey, I had limited my source of truth to Raft's paper, and the code that was given to me, and through this process I've amassed alot of knowledge. I am still rust with go, as I could not properly code up the channel's code at the ticker follower -> candidate part, which I utilized AI's help to get code ideas. For this session I utilized AI as a mechanism to get information quickly, without using it to problem solve. This was a good session, and I really enjoyed this.
+
+---
+
+**June 10, 2026 (afternoon session) — election bug sweep, 7 bugs found and fixed**
+
+**Bugs found in election logic:**
+
+1. **Stale vote goroutines leaking into the next election.** Goroutines don't stop when the election loop exits — they finish their RPC later and send votes into a channel from an election that's already over. Fixed with a `done` channel: `close(done)` broadcasts "stop" to every goroutine at once, and each goroutine uses `select` to either deliver its vote or drop it if the election ended.
+
+2. **Election wait loop could spin forever.** My old loop only exited on (a) majority reached or (b) demoted to Follower. Third case — majority simply unreachable (partition, dead servers) — neither fires, candidate hangs forever, no retry. Real Raft uses an election *timeout*: give up after ~300ms, let the ticker start a fresh election with a new term. This would have failed TestReElection3A.
+
+3. **Busy-spin burning CPU.** Same loop had no sleep/block — checked `len(ch)` at 100% CPU. Replaced with blocking `select` on the vote channel + timeout channel.
+
+4. **Candidate ignored higher term in vote replies.** Paper Figure 2: if a response carries term T > currentTerm, set currentTerm = T and convert to follower. My goroutine only looked at VoteGranted.
+
+5. **Leader ignored higher term in heartbeat replies.** Same Figure 2 rule. Scenario: old leader partitioned, cluster elects new leader with higher term, partition heals — old leader's heartbeats get rejected with the higher term, but it threw replies away and kept thinking it was leader → two leaders. Also reset `lastHeard` on step-down so the demoted leader doesn't instantly start an election against the real one.
+
+6. **Vote grant didn't reset election timer.** A follower that grants a vote should reset `lastHeard`, otherwise it may immediately start a rival election against the candidate it just voted for. (I caught and fixed this one myself.)
+
+7. **Blind election start after random sleep.** Ticker checks the timer, sleeps 50-300ms, then started the election without re-checking. A heartbeat arriving during that sleep should cancel the election — added a re-check of `lastHeard` under lock, `continue` if a leader appeared.
+
+**Final vote-counting structure:**
+
+```go
+votes := 1 // self-vote
+won := false
+timeout := time.After(300 * time.Millisecond)
+
+countLoop:
+for {
+    select {
+    case <-ch:        // a vote arrived — consume it, count it
+        votes++
+        if votes >= noPeers/2+1 {
+            won = true
+            break countLoop
+        }
+    case <-timeout:   // 300ms passed — give up, retry next tick
+        break countLoop
+    }
+    // also exit if AppendEntries demoted us to Follower mid-count
+}
+```
+
+**Go concepts learned today:**
+
+- **`len(ch)` vs `cap(ch)`** — `len` = items currently buffered, `cap` = buffer size. But receiving with `<-ch` (which consumes) is more reliable for counting than polling `len`.
+- **Channel ≠ slice.** Channel is a communication pipe between goroutines; slice is a data structure. `len` works on both but they're different animals.
+- **`done` channel pattern** — `make(chan struct{})`, then `close(done)` as a broadcast stop-signal. Works because a *closed* channel is permanently readable: every `<-done` returns immediately. `struct{}` is zero bytes — pure signal, no data.
+- **Channel internals** — runtime `hchan` struct has a `closed` flag and a `recvq` of parked goroutines; `close()` sets the flag and wakes the entire recvq at once. That's the broadcast mechanism.
+- **`select`** — blocks until ANY case is ready, takes whichever fires first. Votes race against the clock: vote first → count it; timeout first → quit.
+- **`time.After(d)`** — returns a channel that receives one value after duration d. A timer disguised as a channel, so it composes with `select`.
+- **Labeled break (`countLoop:`)** — `break` inside `select` only breaks the select, not the surrounding loop. Label the loop and `break countLoop` to exit the loop itself.
+
+**Rule of the day:** every RPC reply must be checked for a higher term. Figure 2 says so and both step-down bugs (4, 5) were the same miss in two places.
