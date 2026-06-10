@@ -361,3 +361,10 @@ for i := range rf.peers {
 
 
 Another learning: Whenever you are writing, or changing a state which 
+
+
+
+June 9
+I've found a bug in code's current state. I was using wait groups to wait for all the RequestVoteRPC's go routines to return their response. And then I used this response to change our Candidate to the Leader. This idea is wrong because Raft does not wait for all the responses from it's peers. A Candidate is only concerned with 50% of vote from  it's peers. Therefore, The bug I was having with multiple election is found. In the next session I'll simply implement the check fo majority servers using go channels and convert my Candidate when I have recieved majority vote from our Peers. 
+
+I believe there's a fatal error in the implementation of this Lab. The rf.Peer holds all the servers, when we break the connection for more than 50% of servers including the leader, we would never be able to reach majority vote. Therefore, this will make our follower stay as followers forever, which is wrong. 
