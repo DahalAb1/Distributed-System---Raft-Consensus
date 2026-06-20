@@ -43,3 +43,40 @@ a uncommitted entries on a crashed leader just vanish, and the client only finds
 not no lost attempts. For example, Raft promises if you saw "Success," it's permanent.  It does not promise your request will be remembered if you didn't see "Success." 
 A timeout means "I don't know", and "I don't know" includes "your entry got silently thrown away when the leader crashed." You a user retries, and the new leader handles it.
 
+
+
+Jun 20 
+
+For log replication, in the current version 
+
+
+rf.Start() --> this takes user input  (command interface{}, where do we get command from?)
+applyCh --> this is where we send committed logEntries 
+appendRPC --> this is where we send fresh log entries to other followers 
+
+updated understanding 
+rf.Start() --> this takes user input, I misunderstood here, I thought this was supposed to be defined by my code, but this is invoked by the server. The server inputs the log if it's a leader by taking it from the user. I caught this when I did grep -rn ".Start(" 6.5840/src/raft1, which showed grep utilized in server.go, and 6.5840/src/raft1/server.go:89 returns rf.Start(command). 
+
+```
+Programmer's Note : If you want to find where the function, or certain implementation is used. You can use grep. 
+
+These are the Core flags:
+  - -r recursive (search dirs)
+  - -n show line numbers
+  - -i ignore case
+
+  Example : grep -rn "applyCh" 6.5840/src/raft1   
+```
+
+
+Summary of today's learnings: 
+  1. applyCh is local, not network — Go channel = goroutine→goroutine, same process. Two paths: peer↔peer via AppendEntries RPC (network, faked by labrpc), Raft→service via applyCh
+  (top door). Confirmed by grep: tester reads my applyCh in server.go:108 (for m := range applyCh — applier loop).
+  2. Start ≠ wait for commit — appends to leader log, returns (index, term, true) immediately. Replication + commit happen async in background. Don't block.
+  3. ApplyMsg fields — CommandValid: true, Command, CommandIndex. Sent on every node when commitIndex > lastApplied.
+  4. votedFor lifecycle — struct field. Set in RequestVote (grant vote), ticker (vote self), reset -1 on new term. AppendEntries never sets it to leader; track leader separately if
+  needed.
+  5. Heartbeat = empty AppendEntries — don't write 2 RPCs. One timer, entries = log[nextIndex[i]:]. Empty when follower caught up. Heartbeat is circumstance, not special code.
+  6. nextIndex/matchIndex — per-follower arrays. i = follower index, NOT rf.me. nextIndex[rf.me] unused. Leader's own latest = len(rf.log).
+  7. Go init gotcha — make([]int, n) zero-fills (not Python [0]*n). matchIndex starts 0; nextIndex starts len(log) (loop to set). Init in becomeLeader, not Make.
+
