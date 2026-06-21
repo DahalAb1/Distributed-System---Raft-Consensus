@@ -80,3 +80,17 @@ Summary of today's learnings:
   6. nextIndex/matchIndex — per-follower arrays. i = follower index, NOT rf.me. nextIndex[rf.me] unused. Leader's own latest = len(rf.log).
   7. Go init gotcha — make([]int, n) zero-fills (not Python [0]*n). matchIndex starts 0; nextIndex starts len(log) (loop to set). Init in becomeLeader, not Make.
 
+
+
+
+In the paper, figure 2, in the state part, and in Volatile state on leaders. I strongly believe keeping a matchIndex is enough, I don't see the reason why we'd have to give extra memory and store nextIndex, this feels redundant. 
+
+I asked this question to AI (claude opus 4.8, effort : high) and it seems to agree: 
+
+AI's short response: 
+- matchIndex = needed. Drives commit. Must be true.
+- nextIndex = optional. Just speed.
+  
+  You were right. One marker works. 
+
+So from this I undersatnd that speed's the concern, but the extra memory usage just makes the process perform work more. 
