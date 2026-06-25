@@ -94,3 +94,11 @@ AI's short response:
   You were right. One marker works. 
 
 So from this I undersatnd that speed's the concern, but the extra memory usage just makes the process perform work more. 
+
+
+
+Jun 24 
+
+Heartbeats and log-accept are separate. In AppendEntries, for Election, I had intially assumed AppendEntriesReply's Success variable, which is a boolean is supposed to denote if the heartbeat was success or not, this understanding was wrong. Success is used to determine if the log index of the leader and the follower matches or not. 
+
+I've written some code in raft.go, I don't want to forget my changes for next session therefore I did not commit it. 
