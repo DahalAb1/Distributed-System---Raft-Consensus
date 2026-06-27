@@ -102,3 +102,23 @@ Jun 24
 Heartbeats and log-accept are separate. In AppendEntries, for Election, I had intially assumed AppendEntriesReply's Success variable, which is a boolean is supposed to denote if the heartbeat was success or not, this understanding was wrong. Success is used to determine if the log index of the leader and the follower matches or not. 
 
 I've written some code in raft.go, I don't want to forget my changes for next session therefore I did not commit it. 
+
+
+June 27 
+
+One deep perspective change made my life easier when thinking about this consensus machine. Think of each global variable as preserved state, and think of each value inside the function as object state that's temporary. More specifically, think fo the go routines that ran as temporary states that perform some computation on the global states, and that we are performing work on the raft struct's global state, for both tbe server and the follower. 
+
+This perspective shift, and closely looking into figure 2 helped me figure out how we can send AppendRPC from the leader update the nextIndex, and commit index. Also, I noticed, which I should have had before, when writing code for appendRPC's or server we should look into whatever's written in figure 2 for server Rules For server, for append RPC's Reciever Implementations. Just like how I took reference to fill up the structs and rpcs for election do the same in recpliation as well. Closely following figure 2 will reveal the answer by itself. 
+
+A really signficant move here: So I moved the AppendRPC's definition, inside the peer lookup loop, instead of outside the loop which I had assumed would help me send empty append rpc, now instead of empty data we are sending data that's filled up with information, Entries, etc, and a single AppendRPC state can't define it, therefore each outside server will have extra information and will require unique appendRPC. Moving this was a significant step to make log replication to work. 
+
+Important note : Raft uses the voting process to prevent a candidate from
+winning an election unless its log contains all committed
+entries.The
+RequestVote RPC implements this restriction: the RPC
+includes information about the candidate’s log, and the
+voter denies its vote if its own log is more up-to-date than
+that of the candidate.
+
+Implemented applyCh in Make(), the server loads up another go routine that constantly checks if anything can be committed, Then we apply the changes into the applyCh channel, which takes in raftapi.ApplyMsg{} struct, the instructions for implementation is listed in raftapi/raftapi.go, and I simply followed that, created a new go routine that checks for committed data and then implemented that committed data into the state machine by sending the information to the server through applyCh channel. 
+applyCh is a unbuffered channel so until the server recieves it pauses the go routine, this could cause some problem in the future but I believe the tests will work now. 

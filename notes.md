@@ -431,3 +431,22 @@ for {
 
 **Rule of the day:** every RPC reply must be checked for a higher term. Figure 2 says so and both step-down bugs (4, 5) were the same miss in two places.
 
+
+
+
+**For MIT 6.5840 : Running Tests** 
+// to run tests for lab, raft1
+// to test everything in raft_test.go make raft1
+
+# Run a single test
+  cd /Users/abhineshdahal/Documents/Raft\ Consensus/6.5840/src/raft1
+  go test -run TestInitialElection3A -v
+
+  # Run all 3A tests
+  go test -run 3A -v
+
+  # Run all 3B tests
+  go test -run 3B -v
+
+  # Run everything
+  go test -v
