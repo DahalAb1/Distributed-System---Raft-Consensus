@@ -121,4 +121,48 @@ voter denies its vote if its own log is more up-to-date than
 that of the candidate.
 
 Implemented applyCh in Make(), the server loads up another go routine that constantly checks if anything can be committed, Then we apply the changes into the applyCh channel, which takes in raftapi.ApplyMsg{} struct, the instructions for implementation is listed in raftapi/raftapi.go, and I simply followed that, created a new go routine that checks for committed data and then implemented that committed data into the state machine by sending the information to the server through applyCh channel. 
+
+
+The stale reply bug (a reply from my own past)
+
+While scanning my AppendEntries reply handler I got stuck on something that didn't sit right with me. The goroutine that handles a reply does this: it sends the RPC, and then LATER grabs the lock and updates nextIndex/matchIndex for that peer. The only safety check I had was `if res.ReplyTerm > rf.currentTerm` -> step down and return. I genuinely thought that was enough. My argument was: the greater term always wins, so if anything is wrong with terms, that check catches it and I step down.
+
+But that check only protects me against replies that are AHEAD of me. It does nothing about a reply coming from my OWN past. That was the part I was missing.
+
+Here is the timeline that finally made it click:
+
+1. I'm the leader in term 3. I send an AppendEntries to peer P. The network delays it.
+2. I get partitioned, lose leadership. Time passes. Eventually I rejoin and win a new election -> now I'm leader again, but in term 5. On winning, my nextIndex/matchIndex got freshly reinitialized.
+3. That OLD reply from term 3 finally lands. res.ReplyTerm = 3.
+4. My check: is res.ReplyTerm(3) > rf.currentTerm(5)? NO. So no step down, no return.
+5. It falls straight through and edits my fresh term-5 nextIndex/matchIndex using the stale term-3 request. I just applied an old answer to my current state.
+
+So "am I still the same leader" doesn't mean "am I a leader" — it means "am I still the same leadership INCARNATION that sent this exact request, i.e. the same term." I can be leader again in a different term with reset state, and the old reply will quietly corrupt it. The `>` check guards the future; it can't guard the past because the stale reply has a LOWER term, not a higher one.
+
+A second, related symptom is matchIndex going backwards. matchIndex is supposed to only ever increase. But replies can arrive out of order:
+- tick 1: send a request covering up to index 5
+- tick 2: send a request covering up to index 8
+- reply for tick 2 arrives first -> matchIndex = 8 (correct)
+- reply for tick 1 arrives later -> my old line `rf.matchIndex[p] = req.PrevLogIndex + len(req.Entries)` sets it back to 5 (wrong)
+Now my commit scan thinks P only has up to index 5 and can fail to commit index 8.
+
+But wait — how does this situation even arise? I was lost on this for a while. Two replies in flight from the SAME peer at the same time felt impossible until I traced where the requests come from. My ticker loops every ~100ms, and EACH loop, for each peer, it spawns a brand new goroutine that fires one AppendEntries (the `go func...` line). It does NOT wait for the previous goroutine to finish. So:
+- Tick 1 (t=0ms): spawn goroutine A -> sends AppendEntries to peer P. A is now parked waiting on the network for P's reply.
+- Tick 2 (t=100ms): the loop comes around again, spawns goroutine B -> sends ANOTHER AppendEntries to P. B is now also parked waiting.
+Now two replies are in flight from P at once, one for A and one for B. They travel over labrpc's simulated lossy/delayed network, and nothing guarantees A's reply comes back before B's. If A's packet got delayed more than B's, B's reply lands first.
+So that's the whole origin: fire-and-forget goroutines, one per tick, never waiting -> multiple overlapping RPCs to the same peer -> replies can finish out of order. The `max` just makes me immune to which reply wins the race: a smaller stale value can never pull matchIndex back down.
+
+I asked whether I could fix this by being more careful with reinitialization, and the realization was: no, reinit can't fix it. Reinit happens the moment I win (term 5), and the stale reply arrives AFTER that, so it just clobbers the freshly-reinitialized state. Reinit timing is upstream of the problem; the corruption is downstream. The bug is fundamentally "a reply is only valid for the term it was requested in," so the fix has to encode exactly that.
+
+The fix (two parts):
+- term/role guard right after taking the lock, so I drop replies that no longer apply:
+    if rf.role != Leader || rf.currentTerm != req.LeaderTerm { return }
+  (req.LeaderTerm is the term I stamped on the request when I sent it. If it doesn't match my current term, the reply is from a past incarnation -> throw it away.)
+- never let matchIndex regress:
+    rf.matchIndex[p] = max(rf.matchIndex[p], req.PrevLogIndex+len(req.Entries))
+    rf.nextIndex[p]  = rf.matchIndex[p] + 1
+
+Interesting side note I want to remember: the max() on matchIndex actually neutralizes stale SUCCESS replies on its own (a smaller stale value loses to max), so the term guard is mostly there to kill stale FAILURE replies (Success == false -> nextIndex -= 1), which would otherwise spuriously decrement. Together they're what real Raft implementations do.
+
+This one does NOT show up in the basic 3B test because the network is reliable and replies come back promptly and in order. It only bites in the unreliable / partition tests. So I'm noting it now so future-me doesn't rediscover it the hard way when those tests start failing.
 applyCh is a unbuffered channel so until the server recieves it pauses the go routine, this could cause some problem in the future but I believe the tests will work now. 
