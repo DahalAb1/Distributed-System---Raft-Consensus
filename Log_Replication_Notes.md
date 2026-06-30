@@ -166,3 +166,128 @@ Interesting side note I want to remember: the max() on matchIndex actually neutr
 
 This one does NOT show up in the basic 3B test because the network is reliable and replies come back promptly and in order. It only bites in the unreliable / partition tests. So I'm noting it now so future-me doesn't rediscover it the hard way when those tests start failing.
 applyCh is a unbuffered channel so until the server recieves it pauses the go routine, this could cause some problem in the future but I believe the tests will work now. 
+
+
+
+June 29
+
+I've utilized AI to see for any problems in raft.go and reasoned about why some problems are actually problems and some are not. This showed me that we should not rely on ai all the times. 
+
+The one(10) test gives 2 seconds for all 5 servers to apply the first entry, else it fails.
+A new leader can only commit an entry from its own term, not a past term (paper section 5.4.2).
+So if the leader changes during those 2 seconds and no new command comes in, the old entry
+never commits, never gets applied, and the test fails. Bugs 1 and 2 cause that leader change.
+
+
+Bug 1 — new leader is slow to send its first heartbeat (and may send it with a stale term) (solved)
+
+What fails:  one(10), flaky. The leader that accepted the command steps down mid-agreement.
+Reason:      two timing flaws in the ticker's leader branch.
+Paper:       not a paper rule, implementation timing bug. (Section 5.2 only says the leader sends
+             heartbeats periodically to stop followers from timing out.)
+Why (step by step):
+   1. A candidate wins the election and sets role = Leader.
+   2. It does NOT heartbeat right away. Control goes back to the top of the ticker loop:
+      sleep 10ms, read role, then sleep ANOTHER 100ms. So ~110ms pass before the first heartbeat.
+   3. During that 110ms the other servers hear nothing from the new leader, so their election
+      timers keep counting down.
+   4. One of them times out, raises its term, starts a fresh election.
+   5. That higher term reaches the new leader, which steps down. No stable leader -> another
+      election round. Leadership churns.
+   6. Smaller second flaw: the heartbeat term is read ONCE before the 100ms sleep. If the leader
+      stepped down during that sleep, it still sends the old term. Those heartbeats get rejected,
+      so even when it does send, it fails to quiet the rivals.
+Effect on one(10):
+      the test called Start(10) on the node that was leader. That node steps down with entry 10
+      only in its own log. The next leader is in a new term and cannot commit entry 10 (a past-term
+      entry, section 5.4.2), and no new command arrives -> entry 10 is never applied -> test fails.
+Fix:         move the 100ms sleep to the END of the leader branch so a fresh leader heartbeats
+             immediately. Re-read `rf.currentTerm` and re-check `rf.role == Leader` under lock for
+             each peer (break if no longer leader) so it never sends a stale-term heartbeat.
+
+argument : the AI over reasoned for this part, and was correct. The lab explicitely mentioned that each second 10 appendRPC should arrive. I had applied the RPC's sleep in the beginning, this could start a election and disrupt the leader's AppendRPC. 
+
+
+Bug 2 — every server uses the same 400ms election timeout (solved)
+Fix:         updated the timeout logic, implemented randomized value for election timeout, from 300 ms to 500 ms. 
+--> This was a incorrect wrong bug pinned by the AI. I had applied a layered approach for election timeout, first see if the leader is off for 400 seconds, and then start election after this 400 second plus 50 to 300 ms, whatever the random value is supposed to be. AI flagged my style issue as an error which is absolutely incorrect. I've realized that to code properly with AI you'd have to follow it's pattern and design. My perspective on AI has changed a bit, instead of giving us the answer it is a context driven copy paste machine. I believe this is the consequence of using RAG based models which returns similar information from vecoterized database to reduce ai's computational overhead. If this code was put into a raw AI model without any Rag tricks (which is useful but for my use I'm bitter against) the model would have pointed this as not an error. 
+
+
+Bug 3 — AppendEntries truncates the log blindly  
+
+What fails:  later 3B tests (Rejoin, Backup). Committed entries can disappear.
+Reason:      `rf.log = append(rf.log[:PrevLogIndex+1], Entries...)` always cuts and replaces.
+
+Paper:       Figure 2, AppendEntries rule 3 — delete only when an entry CONFLICTS.
+
+Why:         a delayed or reordered RPC carrying fewer/older entries overwrites and deletes
+             entries the follower already had, even committed ones.
+
+My Argument Against this error : The above method preserve's the Leader's completeness, and I don't see a reason that the log entries of the followers has to be truncated, if it is consistent with leader's log then it is, anything that does not match leader's log we can simply change it, this makes communication between leader and follower faster and reduces unnecessary computation to go through the log in the follower. 
+
+
+
+What fails:  unreliable / Backup 3B tests. A server panics, then the cluster freezes.
+
+Reason:      `rf.nextIndex[p] -= 1` runs unconditionally on every failed reply; the stale-reply
+             guard only checks term/role, not whether the reply still matches the current nextIndex.
+Paper:       section 5.3 — leader decrements nextIndex and retries (but never past the start).
+When it fires:
+      needs a follower behind enough to reject at prevIndex >= 1 (reconnect/backtrack) AND two or
+      more concurrent in-flight rejects. Common in unreliable/Backup, rare in reliable. So the
+      single-threaded reasoning explains why it is RARE, not why it is impossible.
+Effect:      the ticker goroutine panics and dies, the leader stops heartbeating, cluster wedges.
+
+
+My argument  against this error (correct for the SEQUENTIAL case):
+      nextIndex never drops below 1. The dummy entry at index 0 always stays, so when nextIndex=1
+      we send prevIndex=0, the dummy always matches, AppendEntries returns true, and we stop
+      decrementing. If replies are handled one at a time, the walk-down self-stops at 1.
+
+AI's reply, Where it still breaks (CONCURRENCY):
+      the ticker fires a new AppendEntries to each peer every ~110ms WITHOUT waiting for the
+      previous reply. So two RPCs to the same behind-follower can be in flight at once, both
+      built when nextIndex=2. Both get rejected, both run the decrement:
+        reply A: 2 -> 1
+        reply B: 1 -> 0
+      The "success at nextIndex=1" never gets a turn, because reply B was SENT while nextIndex
+      was still 2 and lands after A already moved it. nextIndex=0 -> next send uses prevIndex=-1
+      -> rf.log[-1] panics.
+My Argument: 
+    I don't see why we'd recieve 2 different appendRPC's, unless one is reply from Stale leader 
+    and another from the current leader. Can you Explain this concept more clearly 
+
+AI's response: 
+Your ticker sends one heartbeat round every ~110ms and does not wait for the reply (it spawns a goroutine and moves on). 
+So if a reply takes longer than 110ms to come back (slow/delayed network), 
+the next round fires while the previous is still in flight. 
+Now two requests from the same leader are in transit at once.
+
+Timeline (one leader, term T, follower F is behind so it rejects, RTT ≈ 150ms > 110ms interval):
+
+t=0ms    leader loop: reads nextIndex[F]=2, builds R1 (prev=1), sends, moves on
+t=110ms  leader loop: R1 reply NOT back yet, so nextIndex[F] still 2,
+                       builds R2 (prev=1), sends, moves on
+t=150ms  R1 reply lands: Success=false -> nextIndex[F]: 2 -> 1
+t=260ms  R2 reply lands: Success=false -> nextIndex[F]: 1 -> 0   <-- over-decrement
+t=370ms  leader loop: nextIndex[F]=0 -> prev=-1 -> rf.log[-1] PANIC
+
+
+Conclusion: This makes perfect sense to apply the guard. 
+
+Fix: 
+Human's Fix : 
+if res.Success  == false { 	
+				if rf.nextIndex[p] > 1 { 
+								rf.nextIndex[p] -= 1 
+  } 
+} 
+
+Ai's Fix: 
+if res.Success == false {
+    if req.PrevLogIndex < rf.nextIndex[p] {   // I don't see the point to compare this again, the reason we entered the false condition is because this particular comparision failed in the follower
+        rf.nextIndex[p] = max(1, req.PrevLogIndex) // this will break the code, PrevLogIndex that was sent back to us by the follower, the follower does not return it's updated log with req.PrevLogIndex, the leader updates rf.nextIndex's value and then sends another AppendRPC to the followr to verifiy if the current log is similar. Changing this to the AI's recommendation would require us to refactor the whole logic. 
+    }
+}
+
+Conclusion: 
